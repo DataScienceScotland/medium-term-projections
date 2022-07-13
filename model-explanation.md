@@ -1,0 +1,243 @@
+Scotland Covid Impact R Model (SCIRe model)
+================
+
+## Model Outline and Outputs
+
+The main outputs from the model are:
+
+  - Spreadsheets detailing our current estimates of cases with symptoms,
+    total hospitalisation, cases requiring ventilation, deaths, and
+    equipment and medicine required by day and by week.  
+  - Graphs showing the number of people needing hospital beds and
+    intensive care beds by day and by week.
+
+## Requirements for running the model
+
+Functions are stored in multiple R files which should be saved in
+/Code/functions. Required packages are called within the functions. All
+functions can then be sourced using the header.R file:
+
+``` r
+#source("x.R") #if you have files saved locally 
+source("x.R") #if you are accessing files through x
+```
+
+Data and assumptions files should be saved in Data/, and templates for
+the output should be saved in Output templates/. The following folders
+need to be set up to allow the model to save the output spreadsheets and
+charts in:
+
+  - Outputs/Current estimates spreadsheets,  
+  - Outputs/curves,  
+  - Outputs/raw.
+
+## Assumptions used
+
+The model uses assumptions from the file “Model Assumptions.xlsx”. The
+assumptions used in the “No intervention” scenario for people aged 40 to
+49 can be seen by running the follwing code:
+
+``` r
+library(knitr)
+"Scenario setup.xlsx" %>% 
+    get_filepath("Data") %>% 
+    get_scenarios %>% 
+    mutate(data = ID %>%
+             map(prepare_assumptions, Age_group)) %>% # Age_group, Vulnerable, In_care, SIMD for full model
+    unnest %>% 
+  filter(Age_group==40,
+         ID==0) %>%
+  select(Scenario_name, Age_group, `Curve file`,`Curve method`, Assumption, Value) %>%
+  kable(caption="Assumptions used for people aged 40-49 in the 'No intervention' scenario")
+```
+
+## Running the model
+
+The assumptions are run through the function “run\_model” to calculate
+infection and mortality rates for each demographic at each severity
+level of the disease. Severity levels, along with the definitions used
+in the model, are:
+
+  - Mild (asymptomatic),  
+  - Moderate (symptomatic, but will not require hospitalisation),  
+  - Serious (will require oxygen in hospital, but not ventilation),  
+  - Severe (will require non-invasive ventilation, but not invasive
+    ventilation),  
+  - Critical (will require invasive ventilation).
+
+Demographics can be broken down by age group, SIMD level, vulnerability,
+and caring status by including these as inputs in the function
+“run\_model”. As a demonstration, here we will break down by age group
+and look at the rates for people aged 40-49 in the “No intervention”
+scenario.
+
+``` r
+run_model(Age_group) %>% #run_model(Age_group, SIMD, Vulnerable, In_care) for full model
+  filter(ID==0,
+         Age_group==40) %>%
+  select(-ID) %>%
+  kable(caption="Infection and mortality rates used for people aged 40-49 in the 'No intervention' scenario")
+```
+
+Applying these rates to the population will give an estimate of the
+number of people who will be infected or die from the disease. To
+estimate the numbers at each point in time, we first combine these rates
+with a timeline.
+
+There is a curve file named in the assumptions table above. For each
+scenario we use a different curve to estimate the proportion of
+infections at each point in time.
+
+``` r
+curve = get_curve() %>%
+  filter(ID==0,
+         Age_group==40)
+
+curve %>% ggplot(aes(Date,proportion_in_period)) +
+  geom_line(size=1.1) +
+  theme_light() +
+  ggtitle("Proportion of cases over time, in people aged 40-49, in the 'No intervention' scenario") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(axis.title.y = element_blank())
+```
+
+We combine this curve with an estimated timeline for each infection,
+which differs based on demographic and severity level of the infection.
+
+The timeline from the start date of infection for people aged 40-49 with
+a severe illness is shown below.
+
+``` r
+get_timeline(length_of_infection=13,
+             date_of_admission_from_infection_start=9,
+             treatment_recovery_factor=1) %>%
+  filter(In_care=="No",Age_group==40,severity=="Severe",
+         Status %in% c("Asymptomatic", "Symptomatic", "Recovering", "Recovered"),
+         Stat == "Proportion_at") %>%
+  rename("Days from infection start"=date_from_infection) %>%
+  ggplot(aes(`Days from infection start`, proportion, fill=Status)) +
+  geom_bar(position = 'stack', width=1, stat="identity") +
+    ggtitle("Proportion of people at different stages of disease from infection start date") +
+    theme(axis.title.y = element_blank()) +
+    scale_fill_brewer(palette = "Set2")
+```
+
+The chart above excludes treatment statuses, which are a subset of the
+Symptomatic status. The Dead status is also excluded as at this point in
+the model there is no determination as to what proportion live and die,
+and so including the Dead status alongside Recovering and Recovered
+would lead to double counting. This table includes all statuses for
+people aged 40-49 with a severe illness:
+
+``` r
+get_timeline(length_of_infection=13,
+             date_of_admission_from_infection_start=9,
+             treatment_recovery_factor=1) %>%
+  filter(In_care=="No",Age_group==40,severity=="Severe") %>%
+  select(date_from_infection, Stat, Status, proportion) %>% 
+  spread(date_from_infection, proportion, fill=0)
+```
+
+By the combining the curve, the timelines, and infection and mortality
+rates, we can estimate the proportion of people infected, requiring
+treatment, recovering, recovered, and dead at each point in time. We
+calculate the proprotion of people moving into each category
+(Proportion\_starting) and in each category at each point in time
+(Proportion\_at).
+
+``` r
+model=run_model(Age_group)
+
+proportions = run_timeline(Age_group) %>% 
+  get_proportions(model) 
+
+proportions %>% 
+  filter(ID==0, Age_group==40, Date<ymd("2020-09-01")) %>%
+  group_by(Scenario_name,Date,Status) %>%
+  summarise(Proportion_starting=sum(Proportion_starting)) %>%
+  ggplot(aes(Date,Proportion_starting,colour=Status,group=Status)) +
+      geom_line(size=1.1) +
+      theme_light() +
+      ggtitle("Proportion_starting, for people aged 40-49 in the 'No intervention' scenario") +
+      scale_color_brewer(palette = "Dark2") +
+      theme(axis.title.y = element_blank())
+
+proportions %>% 
+  filter(ID==0, Age_group==40, Date<ymd("2020-09-01")) %>%
+  group_by(Scenario_name,Date,Status) %>%
+  summarise(Proportion_at=max(Proportion_at)) %>%
+  ggplot(aes(Date,Proportion_at,colour=Status,group=Status)) +
+      geom_line(size=1.1) +
+      theme_light() +
+      ggtitle("Proportion_at, for people aged 40-49 in the 'No intervention' scenario") +
+      scale_color_brewer(palette = "Dark2") +
+      theme(axis.title.y = element_blank())
+```
+
+Next we apply these proportions to the population of each demographic in
+order to estimate of the number of people infected, requiring treatment,
+recovering, recovered, and number of fatalities for each demographic in
+each intervention scenario.
+
+``` r
+get_population(Age_group) %>% #get_population(Age_group, SIMD, Vulnerable, In_care)
+  mutate(Age_group = recode(Age_group,
+                            `0`="0 to 9", 
+                            `10`="10 to 19",
+                            `20`="20 to 29",
+                            `30`="30 to 39",
+                            `40`="40 to 49",
+                            `50`="50 to 59",
+                            `60`="60 to 69",
+                            `70`="70 to 79",
+                            `80`="80 to 89",
+                            `90`="90+")) %>%
+  kable(caption="Population of people in Scotland, by age group")
+```
+
+Number\_starting gives the number of new people in each category at each
+point in time, and Number\_at gives the total number of people in each
+category at each point in time. We also set the date here.
+
+``` r
+population = get_population(Age_group)
+
+scotland_estimates = proportions %>% 
+    get_totals(population)
+scotland_estimates %>% 
+  filter(ID==0, Age_group==40, Date<ymd("2020-09-01")) %>%
+  group_by(Scenario_name,Date,Status) %>%
+  summarise(Number_starting=sum(Number_starting)) %>%
+  ggplot(aes(Date,Number_starting,colour=Status,group=Status)) +
+      geom_line(size=1.1) +
+      theme_light() +
+      ggtitle("Number_starting, for people aged 40-49 in the 'No intervention' scenario") +
+      scale_color_brewer(palette = "Dark2") +
+      theme(axis.title.y = element_blank())
+
+scotland_estimates %>% 
+  filter(ID==0, Age_group==40, Date<ymd("2020-09-01")) %>%
+  group_by(Scenario_name,Date,Status) %>%
+  summarise(Number_at=max(Number_at)) %>%
+  ggplot(aes(Date,Number_at,colour=Status,group=Status)) +
+      geom_line(size=1.1) +
+      theme_light() +
+      ggtitle("Number_at, for people aged 40-49 in the 'No intervention' scenario") +
+      scale_color_brewer(palette = "Dark2") +
+      theme(axis.title.y = element_blank())
+```
+
+## Outputs
+
+These numbers are used to populate the output spreadsheets and charts by
+running the line of code below. Spreadsheets are saved into the
+/Outputs/Current estimates spreadsheets/ folder, and charts are saved
+into the /Outputs/curves/ folder. We use the charts to update our slide
+pack daily.
+
+``` r
+run_daily_update()
+
+create_excel_output(ymd("2020-09-27"))
+create_slidepack_output(week_min = 20, week_max = 35)
+```
